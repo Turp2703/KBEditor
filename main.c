@@ -6,29 +6,42 @@
 #include <stdlib.h>
 #include <termios.h>
 #include <unistd.h>
+#include <sys/ioctl.h>
+#include <string.h>
+
+///// DEFINES /////
+
+#define CTRL_KEY(k) ((k) & 0x1f)
 
 ///// DATA /////
 
-struct termios original_termios;
+struct editorConfig {
+    int screenRows;
+    int screenCols;
+    struct termios original_termios;
+};
+struct editorConfig EditorConfig;
 
 ///// TERMINAL /////
 
 void die(const char *s){
+    write(STDOUT_FILENO, "\x1b[2J", 4);
+    write(STDOUT_FILENO, "\x1b[H", 3);
     perror(s);
     exit(1);
 }
 
 void disableRawMode(){
-    if(tcsetattr(STDIN_FILENO, TCSAFLUSH, &original_termios) == -1)
+    if(tcsetattr(STDIN_FILENO, TCSAFLUSH, &EditorConfig.original_termios) == -1)
         die("tcsetattr");
 }
 
 void enableRawMode(){
-    if(tcgetattr(STDIN_FILENO, &original_termios) == -1)
+    if(tcgetattr(STDIN_FILENO, &EditorConfig.original_termios) == -1)
         die("tcgetattr");
     atexit(disableRawMode);
     
-    struct termios raw = original_termios;
+    struct termios raw = EditorConfig.original_termios;
     raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
     raw.c_oflag &= ~(OPOST);
     raw.c_cflag |= (CS8);
@@ -39,21 +52,124 @@ void enableRawMode(){
         die("tcsetattr");
 }
 
+char editorReadKey() {
+    char c;
+    int nread;
+    while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
+        if (nread == -1 && errno != EAGAIN) die("read");
+    }
+    return c;
+}
+
+int getCursorPosition(int *rows, int *cols) {
+    char buf[32];
+    unsigned int i = 0;
+    if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) 
+        return -1;
+    while (i < sizeof(buf) - 1) {
+        if (read(STDIN_FILENO, &buf[i], 1) != 1)
+            break;
+        if (buf[i] == 'R') 
+            break;
+        i++;
+    }
+    buf[i] = '\0';
+    if (buf[0] != '\x1b' || buf[1] != '[') 
+        return -1;
+    if (sscanf(&buf[2], "%d;%d", rows, cols) != 2) 
+        return -1;
+    return 0;
+}
+
+int getWindowSize(int *rows, int *cols) {
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
+        if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) 
+            return -1;
+        return getCursorPosition(rows, cols);
+    }
+    else {
+        *rows = ws.ws_row;
+        *cols = ws.ws_col;
+        return 0;
+    }
+}
+
+///// APPEND BUFFER /////
+
+typedef struct aBuf {
+    char *b;
+    int len;
+} AppendBuffer;
+
+#define ABUF_INIT {NULL, 0}
+
+void abAppend(AppendBuffer *ab, const char *s, int len) {
+    char *new = realloc(ab->b, ab->len + len);
+    if (new == NULL) 
+        return;
+    memcpy(&new[ab->len], s, len);
+    ab->b = new;
+    ab->len += len;
+}
+void abFree(AppendBuffer *ab) {
+    free(ab->b);
+}
+
+///// INPUT /////
+
+void editorProcessKeypress() {
+    char c = editorReadKey();
+    switch (c) {
+        case CTRL_KEY('q'):
+            write(STDOUT_FILENO, "\x1b[2J", 4);
+            write(STDOUT_FILENO, "\x1b[H", 3);
+            exit(0);
+            break;
+    }
+}
+
+///// OUTPUT /////
+
+void editorDrawRows(AppendBuffer *ab){
+    for (int y = 0; y < EditorConfig.screenRows; y++){
+        abAppend(ab, "~", 1);
+        abAppend(ab, "\x1b[K", 3); // 'K' = '0K' = Clear line left to cursor
+        if (y < EditorConfig.screenRows - 1)
+            abAppend(ab, "\r\n", 2);
+    }
+}
+
+void editorRefreshScreen(){
+    AppendBuffer ab = ABUF_INIT;
+    
+    // '\x1b' = ESC_CHR, '[' = ESC_SEQ
+    abAppend(&ab, "\x1b[?25l", 6); // '?25l' = Hide Cursor
+    abAppend(&ab, "\x1b[H", 3); // 'H' = '1;1H' = Move cursor
+    
+    editorDrawRows(&ab);
+    
+    abAppend(&ab, "\x1b[H", 3);
+    abAppend(&ab, "\x1b[?25h", 6); // '?25h' = Show Cursor
+    
+    write(STDOUT_FILENO, ab.b, ab.len);
+    abFree(&ab);
+}
+
 ///// INIT /////
+
+void initEditor(){
+    if (getWindowSize(&EditorConfig.screenRows, &EditorConfig.screenCols) == -1)
+        die("getWindowSize");
+}
 
 int main(){
     enableRawMode();
+    initEditor();
     
-    char c = '\0';
-    while(c != 'q'){
-        c = '\0';
-        if(read(STDIN_FILENO, &c, 1) == -1 && errno != EAGAIN)
-            die("read");
-        
-        if(iscntrl(c))
-            printf("%d\r\n", c);
-        else
-            printf("%d ('%c')\r\n", c, c);
+    while(1){
+        editorRefreshScreen();
+        editorProcessKeypress();
     }
     
     return 0;
