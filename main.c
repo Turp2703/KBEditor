@@ -13,9 +13,23 @@
 
 #define CTRL_KEY(k) ((k) & 0x1f)
 
+enum editorKey {
+    ARROW_LEFT = 1000,
+    ARROW_RIGHT,
+    ARROW_UP,
+    ARROW_DOWN,
+    DEL_KEY,
+    HOME_KEY,
+    END_KEY,
+    PAGE_UP,
+    PAGE_DOWN
+};
+
 ///// DATA /////
 
 struct editorConfig {
+    int cursorX;
+    int cursorY;
     int screenRows;
     int screenCols;
     struct termios original_termios;
@@ -52,13 +66,59 @@ void enableRawMode(){
         die("tcsetattr");
 }
 
-char editorReadKey() {
+int editorReadKey() {
     char c;
     int nread;
     while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
         if (nread == -1 && errno != EAGAIN) die("read");
     }
-    return c;
+    
+    if (c == '\x1b') {
+        char seq[3];
+        if (read(STDIN_FILENO, &seq[0], 1) != 1) 
+            return '\x1b';
+        if (read(STDIN_FILENO, &seq[1], 1) != 1) 
+            return '\x1b';
+        
+        if (seq[0] == '[') {
+            
+            if (seq[1] >= '0' && seq[1] <= '9') {
+                if (read(STDIN_FILENO, &seq[2], 1) != 1) 
+                    return '\x1b';
+                if (seq[2] == '~') {
+                    switch (seq[1]) {
+                        case '3': return DEL_KEY;
+                        case '1': return HOME_KEY;
+                        case '4': return END_KEY;
+                        case '5': return PAGE_UP;
+                        case '6': return PAGE_DOWN;
+                        case '7': return HOME_KEY;
+                        case '8': return END_KEY;
+                    }
+                }
+            }
+            else {
+                switch (seq[1]) {
+                    case 'A': return ARROW_UP;
+                    case 'B': return ARROW_DOWN;
+                    case 'C': return ARROW_RIGHT;
+                    case 'D': return ARROW_LEFT;
+                    case 'H': return HOME_KEY;
+                    case 'F': return END_KEY;
+                }
+            }
+        }
+        else if (seq[0] == 'O') {
+            switch (seq[1]) {
+                case 'H': return HOME_KEY;
+                case 'F': return END_KEY;
+            }
+        }
+        
+        return '\x1b';
+    } 
+    else
+        return c;
 }
 
 int getCursorPosition(int *rows, int *cols) {
@@ -118,22 +178,87 @@ void abFree(AppendBuffer *ab) {
 
 ///// INPUT /////
 
+void editorMoveCursor(int key) {
+    switch (key) {
+        case ARROW_LEFT:
+            if(EditorConfig.cursorX != 0)
+                EditorConfig.cursorX--;
+            break;
+        case ARROW_RIGHT:
+            if(EditorConfig.cursorX != EditorConfig.screenCols - 1)
+                EditorConfig.cursorX++;
+            break;
+        case ARROW_UP:
+            if(EditorConfig.cursorY != 0)
+                EditorConfig.cursorY--;
+            break;
+        case ARROW_DOWN:
+            if(EditorConfig.cursorY != EditorConfig.screenRows - 1)
+                EditorConfig.cursorY++;
+            break;
+    }
+}
+
 void editorProcessKeypress() {
-    char c = editorReadKey();
+    int c = editorReadKey();
     switch (c) {
         case CTRL_KEY('q'):
             write(STDOUT_FILENO, "\x1b[2J", 4);
             write(STDOUT_FILENO, "\x1b[H", 3);
             exit(0);
             break;
+            
+        case HOME_KEY:
+            EditorConfig.cursorX = 0;
+            break;
+        case END_KEY:
+            EditorConfig.cursorX = EditorConfig.screenCols - 1;
+            break;
+        
+        case PAGE_UP:
+        case PAGE_DOWN:
+            { // Can't declare inside switch without {}
+                int times = EditorConfig.screenRows;
+                while (times--)
+                    editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
+            }
+            break;
+        
+        case ARROW_LEFT:
+        case ARROW_RIGHT:
+        case ARROW_UP:
+        case ARROW_DOWN:
+            editorMoveCursor(c);
+            break;
     }
 }
 
 ///// OUTPUT /////
 
+void editorDrawWelcome(AppendBuffer *ab){
+    char welcome[80];
+    int welcomelen = snprintf(welcome, sizeof(welcome), "----- Kilo Based Editor -----");
+    if (welcomelen > EditorConfig.screenCols) 
+        welcomelen = EditorConfig.screenCols;
+    
+    int padding = (EditorConfig.screenCols - welcomelen) / 2;
+    if (padding) {
+      abAppend(ab, "~", 1);
+      padding--;
+    }
+    while (padding--) 
+        abAppend(ab, " ", 1);
+    
+    abAppend(ab, welcome, welcomelen);
+}
+
 void editorDrawRows(AppendBuffer *ab){
     for (int y = 0; y < EditorConfig.screenRows; y++){
-        abAppend(ab, "~", 1);
+        if (y == EditorConfig.screenRows / 3) 
+            editorDrawWelcome(ab);
+        else
+            abAppend(ab, "~", 1);
+    
         abAppend(ab, "\x1b[K", 3); // 'K' = '0K' = Clear line left to cursor
         if (y < EditorConfig.screenRows - 1)
             abAppend(ab, "\r\n", 2);
@@ -144,12 +269,15 @@ void editorRefreshScreen(){
     AppendBuffer ab = ABUF_INIT;
     
     // '\x1b' = ESC_CHR, '[' = ESC_SEQ
-    abAppend(&ab, "\x1b[?25l", 6); // '?25l' = Hide Cursor
+    abAppend(&ab, "\x1b[?25l", 6); // '?25l' = Hide cursor
     abAppend(&ab, "\x1b[H", 3); // 'H' = '1;1H' = Move cursor
     
     editorDrawRows(&ab);
     
-    abAppend(&ab, "\x1b[H", 3);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", EditorConfig.cursorY + 1, EditorConfig.cursorX + 1);
+    abAppend(&ab, buf, strlen(buf));
+    
     abAppend(&ab, "\x1b[?25h", 6); // '?25h' = Show Cursor
     
     write(STDOUT_FILENO, ab.b, ab.len);
@@ -159,6 +287,9 @@ void editorRefreshScreen(){
 ///// INIT /////
 
 void initEditor(){
+    EditorConfig.cursorX = 0;
+    EditorConfig.cursorY = 0;
+    
     if (getWindowSize(&EditorConfig.screenRows, &EditorConfig.screenCols) == -1)
         die("getWindowSize");
 }
