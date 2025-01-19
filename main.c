@@ -18,6 +18,8 @@
 
 #define CTRL_KEY(k) ((k) & 0x1f)
 
+const int kTabStop = 4;
+
 enum editorKey {
     ARROW_LEFT = 1000,
     ARROW_RIGHT,
@@ -34,12 +36,17 @@ enum editorKey {
 
 typedef struct editorRow {
     int size;
+    int renderSize;
     char *chars;
+    char *render;
 } editorRow;
 
 struct editorConfig {
     int cursorX;
     int cursorY;
+    int renderX;
+    int rowOffset;
+    int colOffset;
     int screenRows;
     int screenCols;
     int numRows;
@@ -169,6 +176,47 @@ int getWindowSize(int *rows, int *cols) {
 
 ///// ROW OPERATIONS /////
 
+int editorRowCursorToRender(editorRow *row, int cursorX){
+    int renderX = 0;
+    for (int j = 0; j < cursorX; j++) {
+        if (row->chars[j] == '\t')
+            renderX += (kTabStop - 1) - (renderX % kTabStop);
+        renderX++;
+    }
+    return renderX;
+
+    // TODO
+    // int lastTab = -1;
+    // for (int j = 0; j < cursorX; j++)
+        // if (row->chars[j] == '\t')
+            // lastTab = j;
+    // if(lastTab != -1 && cursorX - lastTab < kTabStop)
+        // return lastTab + kTabStop;
+    // return cursorX; 
+}
+
+void editorUpdateRow(editorRow *row){
+    int tabs = 0;
+    int j;
+    for(j = 0; j < row->size; j++)
+        if(row->chars[j] == '\t') 
+            tabs++;
+        
+    free(row->render);
+    row->render = malloc(row->size + tabs * (kTabStop - 1) + 1);
+    
+    int idx = 0;
+    for (j = 0; j < row->size; j++){
+        if(row->chars[j] == '\t')
+            do row->render[idx++] = ' ';
+            while(idx % kTabStop != 0);
+        else
+            row->render[idx++] = row->chars[j];
+    }
+    row->render[idx] = '\0';
+    row->renderSize = idx;
+}
+
 void editorAppendRow(char *s, size_t len){
     EditorConfig.rows = realloc(EditorConfig.rows, sizeof(editorRow) * (EditorConfig.numRows + 1));
     
@@ -177,6 +225,11 @@ void editorAppendRow(char *s, size_t len){
     EditorConfig.rows[current].chars = malloc(len + 1);
     memcpy(EditorConfig.rows[current].chars, s, len);
     EditorConfig.rows[current].chars[len] = '\0';
+    
+    EditorConfig.rows[current].renderSize = 0;
+    EditorConfig.rows[current].render = NULL;
+    editorUpdateRow(&EditorConfig.rows[current]);
+    
     EditorConfig.numRows++;
 }
 
@@ -224,24 +277,41 @@ void abFree(AppendBuffer *ab) {
 ///// INPUT /////
 
 void editorMoveCursor(int key) {
+    editorRow *row = (EditorConfig.cursorY >= EditorConfig.numRows) 
+                    ? NULL 
+                    : &EditorConfig.rows[EditorConfig.cursorY];
+    
     switch (key) {
         case ARROW_LEFT:
             if(EditorConfig.cursorX != 0)
                 EditorConfig.cursorX--;
+            else if(EditorConfig.cursorY > 0)
+                EditorConfig.cursorX = EditorConfig.rows[--EditorConfig.cursorY].size;
             break;
         case ARROW_RIGHT:
-            if(EditorConfig.cursorX != EditorConfig.screenCols - 1)
+            if(row && EditorConfig.cursorX < row->size)
                 EditorConfig.cursorX++;
+            else if(row && EditorConfig.cursorX == row->size){
+                EditorConfig.cursorY++;
+                EditorConfig.cursorX = 0;
+            }
             break;
         case ARROW_UP:
             if(EditorConfig.cursorY != 0)
                 EditorConfig.cursorY--;
             break;
         case ARROW_DOWN:
-            if(EditorConfig.cursorY != EditorConfig.screenRows - 1)
+            if(EditorConfig.cursorY < EditorConfig.numRows)
                 EditorConfig.cursorY++;
             break;
     }
+    
+    row = (EditorConfig.cursorY >= EditorConfig.numRows) 
+        ? NULL 
+        : &EditorConfig.rows[EditorConfig.cursorY];
+    int rowLength = row ? row->size : 0;
+    if(EditorConfig.cursorX > rowLength)
+        EditorConfig.cursorX = rowLength;
 }
 
 void editorProcessKeypress() {
@@ -257,12 +327,20 @@ void editorProcessKeypress() {
             EditorConfig.cursorX = 0;
             break;
         case END_KEY:
-            EditorConfig.cursorX = EditorConfig.screenCols - 1;
+            if(EditorConfig.cursorY < EditorConfig.numRows)
+                EditorConfig.cursorX = EditorConfig.rows[EditorConfig.cursorY].size;
             break;
         
         case PAGE_UP:
         case PAGE_DOWN:
             { // Can't declare inside switch without {}
+                if (c == PAGE_UP)
+                    EditorConfig.cursorY = EditorConfig.rowOffset;
+                else if (c == PAGE_DOWN) {
+                    EditorConfig.cursorY = EditorConfig.rowOffset + EditorConfig.screenRows - 1;
+                    if (EditorConfig.cursorY > EditorConfig.numRows) 
+                        EditorConfig.cursorY = EditorConfig.numRows;
+                }
                 int times = EditorConfig.screenRows;
                 while (times--)
                     editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
@@ -279,6 +357,22 @@ void editorProcessKeypress() {
 }
 
 ///// OUTPUT /////
+
+void editorScroll(){
+    EditorConfig.renderX = 0;
+    if(EditorConfig.cursorY < EditorConfig.numRows)
+        EditorConfig.renderX = editorRowCursorToRender(&EditorConfig.rows[EditorConfig.cursorY], EditorConfig.cursorX);
+    
+    if(EditorConfig.cursorY < EditorConfig.rowOffset)
+        EditorConfig.rowOffset = EditorConfig.cursorY;
+    if(EditorConfig.cursorY >= EditorConfig.rowOffset + EditorConfig.screenRows)
+        EditorConfig.rowOffset = EditorConfig.cursorY - EditorConfig.screenRows + 1;;
+    
+    if(EditorConfig.renderX < EditorConfig.colOffset)
+        EditorConfig.colOffset = EditorConfig.renderX;
+    if(EditorConfig.renderX >= EditorConfig.colOffset + EditorConfig.screenCols)
+        EditorConfig.colOffset = EditorConfig.renderX - EditorConfig.screenCols + 1;
+}
 
 void editorDrawWelcome(AppendBuffer *ab){
     char welcome[80];
@@ -299,17 +393,20 @@ void editorDrawWelcome(AppendBuffer *ab){
 
 void editorDrawRows(AppendBuffer *ab){
     for (int y = 0; y < EditorConfig.screenRows; y++){
-        if(y >= EditorConfig.numRows){
+        int currentRow = y + EditorConfig.rowOffset;
+        if(currentRow >= EditorConfig.numRows){
             if (EditorConfig.numRows == 0 && y == EditorConfig.screenRows / 3)
                 editorDrawWelcome(ab);
             else
                 abAppend(ab, "~", 1);
         }
         else{
-            int len = EditorConfig.rows[y].size;
+            int len = EditorConfig.rows[currentRow].renderSize - EditorConfig.colOffset;
+            if(len < 0)
+                len = 0;
             if(len > EditorConfig.screenCols)
                 len = EditorConfig.screenCols;
-            abAppend(ab, EditorConfig.rows[y].chars, len);
+            abAppend(ab, &EditorConfig.rows[currentRow].render[EditorConfig.colOffset], len);
         }
     
         abAppend(ab, "\x1b[K", 3); // 'K' = '0K' = Clear line left to cursor
@@ -319,6 +416,8 @@ void editorDrawRows(AppendBuffer *ab){
 }
 
 void editorRefreshScreen(){
+    editorScroll();
+    
     AppendBuffer ab = ABUF_INIT;
     
     // '\x1b' = ESC_CHR, '[' = ESC_SEQ
@@ -328,7 +427,9 @@ void editorRefreshScreen(){
     editorDrawRows(&ab);
     
     char buf[32];
-    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", EditorConfig.cursorY + 1, EditorConfig.cursorX + 1);
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH"
+            , (EditorConfig.cursorY - EditorConfig.rowOffset) + 1
+            , (EditorConfig.renderX - EditorConfig.colOffset) + 1);
     abAppend(&ab, buf, strlen(buf));
     
     abAppend(&ab, "\x1b[?25h", 6); // '?25h' = Show Cursor
@@ -342,6 +443,9 @@ void editorRefreshScreen(){
 void initEditor(){
     EditorConfig.cursorX = 0;
     EditorConfig.cursorY = 0;
+    EditorConfig.renderX = 0;
+    EditorConfig.rowOffset = 0;
+    EditorConfig.colOffset = 0;
     EditorConfig.numRows = 0;
     EditorConfig.rows = NULL;
     
