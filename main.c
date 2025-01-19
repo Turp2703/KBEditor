@@ -7,12 +7,14 @@
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <termios.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <string.h>
+#include <time.h>
 
 ///// DEFINES /////
 
@@ -51,6 +53,9 @@ struct editorConfig {
     int screenCols;
     int numRows;
     editorRow *rows;
+    char *filename;
+    char statusMsg[80];
+    time_t statusMsgTime;
     struct termios original_termios;
 };
 struct editorConfig EditorConfig;
@@ -236,6 +241,9 @@ void editorAppendRow(char *s, size_t len){
 ///// FILE I/O /////
 
 void editorOpen(char *fileName){
+    free(EditorConfig.filename);
+    EditorConfig.filename = strdup(fileName);
+    
     FILE *fp = fopen(fileName, "r");
     if(!fp)
         die("fopen");
@@ -410,9 +418,45 @@ void editorDrawRows(AppendBuffer *ab){
         }
     
         abAppend(ab, "\x1b[K", 3); // 'K' = '0K' = Clear line left to cursor
-        if (y < EditorConfig.screenRows - 1)
-            abAppend(ab, "\r\n", 2);
+        abAppend(ab, "\r\n", 2);
     }
+}
+
+void editorDrawStatusBar(AppendBuffer *ab){
+    abAppend(ab, "\x1b[7m", 4); // '7m' = Invert colors
+    
+    char status[80];
+    int len = snprintf(status, sizeof(status), "%.20s - %d lines", 
+                    EditorConfig.filename ? EditorConfig.filename : "[No Name]", 
+                    EditorConfig.numRows);
+    char rightStatus[80];
+    int rightLen = snprintf(rightStatus, sizeof(rightStatus), "%d/%d ",
+                    EditorConfig.cursorY + 1, EditorConfig.numRows);
+    if (len > EditorConfig.screenCols) 
+        len = EditorConfig.screenCols;
+    abAppend(ab, status, len);
+    
+    while (len < EditorConfig.screenCols) {
+        if(EditorConfig.screenCols - len == rightLen){
+            abAppend(ab, rightStatus, rightLen);
+            break;
+        }
+        else{
+            abAppend(ab, " ", 1);
+            len++;
+        }
+    }
+    abAppend(ab, "\x1b[m", 3); // 'm' = Normal colors
+    abAppend(ab, "\r\n", 2);
+}
+
+void editorDrawMessageBar(AppendBuffer *ab){
+    abAppend(ab, "\x1b[K", 3);
+    int msgLen = strlen(EditorConfig.statusMsg);
+    if (msgLen > EditorConfig.screenCols) 
+        msgLen = EditorConfig.screenCols;
+    if (msgLen && time(NULL) - EditorConfig.statusMsgTime < 5)
+        abAppend(ab, EditorConfig.statusMsg, msgLen);
 }
 
 void editorRefreshScreen(){
@@ -425,6 +469,8 @@ void editorRefreshScreen(){
     abAppend(&ab, "\x1b[H", 3); // 'H' = '1;1H' = Move cursor
     
     editorDrawRows(&ab);
+    editorDrawStatusBar(&ab);
+    editorDrawMessageBar(&ab);
     
     char buf[32];
     snprintf(buf, sizeof(buf), "\x1b[%d;%dH"
@@ -438,6 +484,14 @@ void editorRefreshScreen(){
     abFree(&ab);
 }
 
+void editorSetStatusMessage(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(EditorConfig.statusMsg, sizeof(EditorConfig.statusMsg), fmt, ap);
+    va_end(ap);
+    EditorConfig.statusMsgTime = time(NULL);
+}
+
 ///// INIT /////
 
 void initEditor(){
@@ -448,9 +502,14 @@ void initEditor(){
     EditorConfig.colOffset = 0;
     EditorConfig.numRows = 0;
     EditorConfig.rows = NULL;
+    EditorConfig.filename = NULL;
+    EditorConfig.statusMsg[0] = '\0';
+    EditorConfig.statusMsgTime = 0;
     
     if (getWindowSize(&EditorConfig.screenRows, &EditorConfig.screenCols) == -1)
         die("getWindowSize");
+    
+    EditorConfig.screenRows -= 2; // Status
 }
 
 int main(int argc, char *argv[]){
@@ -458,6 +517,8 @@ int main(int argc, char *argv[]){
     initEditor();
     if(argc >= 2)
         editorOpen(argv[1]);
+    
+    editorSetStatusMessage("HELP: Ctrl-Q → quit");
     
     while(1){
         editorRefreshScreen();
