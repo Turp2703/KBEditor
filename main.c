@@ -6,6 +6,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -23,6 +24,7 @@
 const int kTabStop = 4;
 
 enum editorKey {
+    BACKSPACE = 127,
     ARROW_LEFT = 1000,
     ARROW_RIGHT,
     ARROW_UP,
@@ -238,7 +240,44 @@ void editorAppendRow(char *s, size_t len){
     EditorConfig.numRows++;
 }
 
+void editorRowInsertChar(editorRow *row, int pos, int c){
+    if(pos < 0 || pos > row->size)
+        pos = row->size;
+    row->chars = realloc(row->chars, row->size + 2);
+    memmove(&row->chars[pos + 1], &row->chars[pos], row->size - pos + 1);
+    row->size++;
+    row->chars[pos] = c;
+    editorUpdateRow(row);
+}
+
+///// EDITOR OPERATIONS /////
+
+void editorInsertChar(int c){
+    if(EditorConfig.cursorY == EditorConfig.numRows)
+        editorAppendRow("", 0);
+    editorRowInsertChar(&EditorConfig.rows[EditorConfig.cursorY], EditorConfig.cursorX, c);
+    EditorConfig.cursorX++;
+}
+
 ///// FILE I/O /////
+
+char *editorRowsToString(int *bufferLength){
+    int totalLength = 0;
+    for(int j = 0; j < EditorConfig.numRows; j++)
+        totalLength += EditorConfig.rows[j].size + 1;
+    *bufferLength = totalLength;
+    
+    char *buffer = malloc(totalLength);
+    char *p = buffer;
+    for(int j = 0; j < EditorConfig.numRows; j++){
+        memcpy(p, EditorConfig.rows[j].chars, EditorConfig.rows[j].size);
+        p += EditorConfig.rows[j].size;
+        *p = '\n';
+        p++;
+    }
+    
+    return buffer;
+}
 
 void editorOpen(char *fileName){
     free(EditorConfig.filename);
@@ -258,6 +297,20 @@ void editorOpen(char *fileName){
     }
     free(line);
     fclose(fp);
+}
+
+void editorSave(){
+    if(EditorConfig.filename == NULL) 
+        return; // TODO
+    
+    int length;
+    char *buffer = editorRowsToString(&length);
+    
+    int fd = open(EditorConfig.filename, O_RDWR | O_CREAT, 0644); // 0644 = Permissions
+    ftruncate(fd, length);
+    write(fd, buffer, length);
+    close(fd);
+    free(buffer);
 }
 
 ///// APPEND BUFFER /////
@@ -325,10 +378,18 @@ void editorMoveCursor(int key) {
 void editorProcessKeypress() {
     int c = editorReadKey();
     switch (c) {
+        case '\r':
+            // TODO
+            break;
+        
         case CTRL_KEY('q'):
             write(STDOUT_FILENO, "\x1b[2J", 4);
             write(STDOUT_FILENO, "\x1b[H", 3);
             exit(0);
+            break;
+            
+        case CTRL_KEY('s'):
+            editorSave();
             break;
             
         case HOME_KEY:
@@ -337,6 +398,12 @@ void editorProcessKeypress() {
         case END_KEY:
             if(EditorConfig.cursorY < EditorConfig.numRows)
                 EditorConfig.cursorX = EditorConfig.rows[EditorConfig.cursorY].size;
+            break;
+            
+        case BACKSPACE:
+        case CTRL_KEY('h'):
+        case DEL_KEY:
+            // TODO
             break;
         
         case PAGE_UP:
@@ -360,6 +427,14 @@ void editorProcessKeypress() {
         case ARROW_UP:
         case ARROW_DOWN:
             editorMoveCursor(c);
+            break;
+            
+        case CTRL_KEY('l'):
+        case '\x1b':
+            break;
+            
+        default:
+            editorInsertChar(c);
             break;
     }
 }
