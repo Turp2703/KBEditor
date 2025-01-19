@@ -1,5 +1,9 @@
 ///// INCLUDES /////
 
+#define _DEFAULT_SOURCE
+#define _BSD_SOURCE
+#define _GNU_SOURCE
+
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
@@ -7,6 +11,7 @@
 #include <termios.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <sys/types.h>
 #include <string.h>
 
 ///// DEFINES /////
@@ -27,11 +32,18 @@ enum editorKey {
 
 ///// DATA /////
 
+typedef struct editorRow {
+    int size;
+    char *chars;
+} editorRow;
+
 struct editorConfig {
     int cursorX;
     int cursorY;
     int screenRows;
     int screenCols;
+    int numRows;
+    editorRow *rows;
     struct termios original_termios;
 };
 struct editorConfig EditorConfig;
@@ -155,6 +167,38 @@ int getWindowSize(int *rows, int *cols) {
     }
 }
 
+///// ROW OPERATIONS /////
+
+void editorAppendRow(char *s, size_t len){
+    EditorConfig.rows = realloc(EditorConfig.rows, sizeof(editorRow) * (EditorConfig.numRows + 1));
+    
+    int current = EditorConfig.numRows;
+    EditorConfig.rows[current].size = len;
+    EditorConfig.rows[current].chars = malloc(len + 1);
+    memcpy(EditorConfig.rows[current].chars, s, len);
+    EditorConfig.rows[current].chars[len] = '\0';
+    EditorConfig.numRows++;
+}
+
+///// FILE I/O /////
+
+void editorOpen(char *fileName){
+    FILE *fp = fopen(fileName, "r");
+    if(!fp)
+        die("fopen");
+    
+    char *line = NULL;
+    size_t lineCap = 0;
+    ssize_t lineLength;
+    while((lineLength = getline(&line, &lineCap, fp)) != -1){
+        while(lineLength > 0 && (line[lineLength - 1] == '\n' || line[lineLength - 1] == '\r'))
+            lineLength--;
+        editorAppendRow(line, lineLength);
+    }
+    free(line);
+    fclose(fp);
+}
+
 ///// APPEND BUFFER /////
 
 typedef struct aBuf {
@@ -172,6 +216,7 @@ void abAppend(AppendBuffer *ab, const char *s, int len) {
     ab->b = new;
     ab->len += len;
 }
+
 void abFree(AppendBuffer *ab) {
     free(ab->b);
 }
@@ -254,10 +299,18 @@ void editorDrawWelcome(AppendBuffer *ab){
 
 void editorDrawRows(AppendBuffer *ab){
     for (int y = 0; y < EditorConfig.screenRows; y++){
-        if (y == EditorConfig.screenRows / 3) 
-            editorDrawWelcome(ab);
-        else
-            abAppend(ab, "~", 1);
+        if(y >= EditorConfig.numRows){
+            if (EditorConfig.numRows == 0 && y == EditorConfig.screenRows / 3)
+                editorDrawWelcome(ab);
+            else
+                abAppend(ab, "~", 1);
+        }
+        else{
+            int len = EditorConfig.rows[y].size;
+            if(len > EditorConfig.screenCols)
+                len = EditorConfig.screenCols;
+            abAppend(ab, EditorConfig.rows[y].chars, len);
+        }
     
         abAppend(ab, "\x1b[K", 3); // 'K' = '0K' = Clear line left to cursor
         if (y < EditorConfig.screenRows - 1)
@@ -289,14 +342,18 @@ void editorRefreshScreen(){
 void initEditor(){
     EditorConfig.cursorX = 0;
     EditorConfig.cursorY = 0;
+    EditorConfig.numRows = 0;
+    EditorConfig.rows = NULL;
     
     if (getWindowSize(&EditorConfig.screenRows, &EditorConfig.screenCols) == -1)
         die("getWindowSize");
 }
 
-int main(){
+int main(int argc, char *argv[]){
     enableRawMode();
     initEditor();
+    if(argc >= 2)
+        editorOpen(argv[1]);
     
     while(1){
         editorRefreshScreen();
