@@ -70,6 +70,8 @@ void editorSetStatusMessage(const char *fmt, ...);
 
 void editorRefreshScreen();
 
+char *editorPrompt(char *prompt);
+
 ///// TERMINAL /////
 
 void die(const char *s){
@@ -377,8 +379,13 @@ void editorOpen(char *fileName){
 }
 
 void editorSave(){
-    if(EditorConfig.filename == NULL) 
-        return; // TODO
+    if(EditorConfig.filename == NULL){
+        EditorConfig.filename = editorPrompt("Save as: %s");
+        if(EditorConfig.filename == NULL){
+            editorSetStatusMessage("Save aborted");
+            return;
+        }
+    }
     
     int length;
     char *buffer = editorRowsToString(&length);
@@ -424,6 +431,44 @@ void abFree(AppendBuffer *ab) {
 }
 
 ///// INPUT /////
+
+char *editorPrompt(char *prompt){
+    size_t bufferSize = 128;
+    char *buffer = malloc(bufferSize);
+    
+    size_t bufferLength = 0;
+    buffer[0] = '\0';
+    
+    while(1){
+        editorSetStatusMessage(prompt, buffer);
+        editorRefreshScreen();
+        
+        int c = editorReadKey();
+        if(c == DEL_KEY || c == CTRL_KEY('h') || c == BACKSPACE){
+            if(bufferLength != 0)
+                buffer[--bufferLength] = '\0';
+        }
+        else if(c == '\x1b'){
+            editorSetStatusMessage("");
+            free(buffer);
+            return NULL;
+        }
+        else if(c == '\r'){
+            if(bufferLength != 0){
+                editorSetStatusMessage("");
+                return buffer;
+            }
+        }
+        else if(!iscntrl(c) && c < 128){
+            if(bufferLength == bufferSize - 1){
+                bufferSize *= 2;
+                buffer = realloc(buffer, bufferSize);
+            }
+            buffer[bufferLength++] = c;
+            buffer[bufferLength] = '\0';
+        }
+    }
+}
 
 void editorMoveCursor(int key) {
     editorRow *row = (EditorConfig.cursorY >= EditorConfig.numRows) 
