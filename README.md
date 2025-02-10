@@ -25,5 +25,5 @@ make
 
 ## Reference
 
-[Kilo Text Editor (Snaptoken)](https://viewsourcecode.org/snaptoken/kilo/)
-[Original Kilo Editor](https://antirez.com/news/108)
+- [Kilo Text Editor (Snaptoken)](https://viewsourcecode.org/snaptoken/kilo/)
+- [Original Kilo Editor](https://antirez.com/news/108)
